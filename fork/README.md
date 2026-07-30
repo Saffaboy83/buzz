@@ -42,14 +42,31 @@ deploy config.
 
 ## Deployment
 
-Vercel builds from the repo root using `/vercel.json`:
+Vercel project `buzz` → **https://buzz-eta-five.vercel.app**
 
-- install: `pnpm install --frozen-lockfile` (workspace root, so patches apply)
+It builds from the repo root using `/vercel.json`:
+
+- install: `pnpm install --frozen-lockfile` (workspace root, so the patches apply)
 - build: `pnpm --filter buzz-web build`
 - output: `web/dist`
-- SPA rewrite so TanStack Router deep links resolve on refresh
+- SPA rewrite so TanStack Router deep links survive a refresh
+- Node pinned to 22.x; `ENABLE_EXPERIMENTAL_COREPACK=1` so Vercel honours
+  `packageManager: pnpm@11.4.0` instead of falling back to its own pnpm
 
-Every push to `main` — whether from a sync or your own commit — redeploys.
+### Why there's a deploy hook
+
+On the Hobby plan Vercel refuses to build a commit whose author isn't tied to
+the account. Your own pushes deploy normally, but the daily sync's merge commit
+is authored by `github-actions[bot]`, so pushing it would silently not deploy.
+
+The workflow therefore calls a Vercel deploy hook after a successful sync. The
+hook URL lives in the repo secret `VERCEL_DEPLOY_HOOK_URL` — it is a credential
+(anyone holding it can trigger a build), so it is never committed. Rotate it by
+deleting and recreating the hook in Vercel → Settings → Git → Deploy Hooks, then:
+
+```bash
+gh secret set VERCEL_DEPLOY_HOOK_URL --repo Saffaboy83/buzz
+```
 
 ## Two things worth knowing
 

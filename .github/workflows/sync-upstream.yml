@@ -37,6 +37,7 @@ jobs:
           if echo "$body" | grep -q '"merge_type"'; then
             merge_type=$(echo "$body" | sed -n 's/.*"merge_type": *"\([^"]*\)".*/\1/p')
             echo "status=ok" >> "$GITHUB_OUTPUT"
+            echo "merge_type=$merge_type" >> "$GITHUB_OUTPUT"
             echo "::notice::Sync succeeded (merge_type=$merge_type)"
           else
             echo "status=failed" >> "$GITHUB_OUTPUT"
@@ -47,6 +48,26 @@ jobs:
             } >> "$GITHUB_OUTPUT"
             echo "::error::Sync failed — see the issue opened by the next step."
           fi
+
+      # The merge commit this workflow creates is authored by github-actions[bot].
+      # Vercel's Hobby plan refuses to build a commit whose author is not tied to
+      # the account, so the push alone will not deploy. A deploy hook is not
+      # author-scoped, so it always builds current main.
+      - name: Trigger the Vercel production deploy
+        if: steps.sync.outputs.status == 'ok' && steps.sync.outputs.merge_type != 'none'
+        env:
+          HOOK: ${{ secrets.VERCEL_DEPLOY_HOOK_URL }}
+        run: |
+          if [ -z "$HOOK" ]; then
+            echo "::warning::VERCEL_DEPLOY_HOOK_URL is not set — skipping the deploy trigger."
+            exit 0
+          fi
+          code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$HOOK")
+          echo "deploy hook responded: $code"
+          case "$code" in
+            2*) echo "::notice::Vercel production deploy triggered." ;;
+            *) echo "::error::Deploy hook returned $code"; exit 1 ;;
+          esac
 
       - name: Open an issue when the sync needs a human
         if: steps.sync.outputs.status == 'failed'
