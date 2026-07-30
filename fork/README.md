@@ -127,3 +127,56 @@ them with:
 ```bash
 gh workflow enable "CI" --repo Saffaboy83/buzz
 ```
+
+## Desktop agent latency
+
+Symptom: saying "hi" took over a minute for an agent to answer.
+
+It was not the relay. Measured from this machine: **108 ms** median HTTP RTT and
+~200 ms WSS connect-to-AUTH against Railway. The cost was local.
+
+`managed-agents.json` had **10 agent entries, all active, every one at
+`parallelism: 10`**. Parallelism is not a throughput dial — the ACP startup log
+shows it spawning real Node child processes (`agent=0` … `agent=9` →
+`agent_pool_ready agents=10`). So each running agent is 1 supervisor + 10
+`claude-agent-acp` Node processes. Three agents had actually started: **33
+processes**. On a 15.7 GB machine with ~2 GB free (claude, node, and ChatGPT
+already resident), that swaps, and swapping is where the minute went.
+
+Applied in `%APPDATA%\xyz.block.buzz.app\agents\` (backups alongside, suffixed
+`.bak-before-tuning`):
+
+| Setting | Was | Now | Why |
+| --- | --- | --- | --- |
+| `BUZZ_ACP_AGENTS` (global env) | unset → 10 | `2` | caps every agent's pool |
+| `CLAUDE_CODE_EFFORT_LEVEL` | unset | `low` | fable-5 is adaptive/xhigh-capable; "hi" does not need a reasoning budget |
+| `parallelism` per agent | 10 | 2 | belt and braces with the env cap |
+| active agents | 10 | 1 (Fabey) | one responder beats four talking over each other |
+| `turn_timeout_seconds` | 320 | 90 | a hung turn surfaces instead of stalling |
+| `start_on_app_launch` | false | true (Fabey) | pool spawn is paid at launch, not charged to your first message |
+
+Worst case went from **110 processes to 12**; in practice 3.
+
+Re-apply any time (with the app closed) — it is idempotent:
+
+```bash
+python fork/tune-desktop-agents.py
+```
+
+### The one that matters if you touch this again
+
+**The app rewrites `managed-agents.json` on every launch.** It re-seeds the
+builtin personas (fizz/honey/bumble) as *new, active* entries at the hardcoded
+`DEFAULT_AGENT_PARALLELISM = 10`, with empty pubkeys. Deleting the Welcome Team
+from `teams.json` does **not** stop it — they come from the builtin persona seed,
+not the team. So editing that file is not durable on its own.
+
+What *is* durable is the global env layer. `runtime.rs` writes
+`BUZZ_ACP_AGENTS` from the record at line 729, then writes user `env_vars`
+**last** (line 860) so they win, and `BUZZ_ACP_AGENTS` is not in
+`RESERVED_ENV_KEYS` — so the global cap survives every re-seed. Put
+performance limits in `global-agent-config.json`, not in per-agent records.
+
+A proper fix (raising the default, stopping the re-seed) is a code change, and
+this machine has no `cargo`/`rustc` — rebuilding the Tauri desktop app from this
+fork would mean installing the Rust toolchain first.
