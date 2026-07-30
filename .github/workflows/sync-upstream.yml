@@ -1,0 +1,87 @@
+# Fork-local workflow (not from block/buzz).
+# Keeps Saffaboy83/buzz current with upstream block/buzz.
+#
+# Strategy: use GitHub's native merge-upstream API rather than a git push.
+# A push made with GITHUB_TOKEN is refused when the commit touches
+# .github/workflows/**, and upstream changes those files regularly.
+# merge-upstream is performed server-side by GitHub, so it sidesteps that.
+name: Sync fork with upstream
+
+on:
+  schedule:
+    # Daily at 06:17 UTC. Offset minute to avoid the top-of-hour queue.
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sync main from upstream
+        id: sync
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          body=$(gh api -X POST "repos/$REPO/merge-upstream" -f branch=main 2>&1) || true
+          echo "response: $body"
+
+          if echo "$body" | grep -q '"merge_type"'; then
+            merge_type=$(echo "$body" | sed -n 's/.*"merge_type": *"\([^"]*\)".*/\1/p')
+            echo "status=ok" >> "$GITHUB_OUTPUT"
+            echo "::notice::Sync succeeded (merge_type=$merge_type)"
+          else
+            echo "status=failed" >> "$GITHUB_OUTPUT"
+            {
+              echo "detail<<VERBATIM_EOF"
+              echo "$body"
+              echo "VERBATIM_EOF"
+            } >> "$GITHUB_OUTPUT"
+            echo "::error::Sync failed — see the issue opened by the next step."
+          fi
+
+      - name: Open an issue when the sync needs a human
+        if: steps.sync.outputs.status == 'failed'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          DETAIL: ${{ steps.sync.outputs.detail }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          {
+            echo "The scheduled upstream sync could not complete automatically."
+            echo
+            echo '```'
+            echo "$DETAIL"
+            echo '```'
+            echo
+            echo 'Resolve it locally — that path uses a token with the `workflow` scope, which the Actions token lacks:'
+            echo
+            echo '```powershell'
+            echo 'cd C:\Users\arno_\Buzz'
+            echo '.\fork\sync-upstream.ps1'
+            echo '```'
+            echo
+            echo "Run: $RUN_URL"
+          } > issue-body.md
+
+          existing=$(gh issue list --repo "$REPO" --state open \
+            --label upstream-sync --limit 1 --json number --jq '.[0].number' 2>/dev/null || true)
+
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$REPO" --body-file issue-body.md
+          else
+            gh label create upstream-sync --repo "$REPO" --color D93F0B \
+              --description "Automated upstream sync needs attention" 2>/dev/null || true
+            gh issue create --repo "$REPO" --label upstream-sync \
+              --title "Upstream sync needs manual attention" --body-file issue-body.md
+          fi
+          exit 1
