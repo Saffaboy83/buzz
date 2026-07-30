@@ -68,16 +68,57 @@ deleting and recreating the hook in Vercel → Settings → Git → Deploy Hooks
 gh secret set VERCEL_DEPLOY_HOOK_URL --repo Saffaboy83/buzz
 ```
 
-## Two things worth knowing
+## The relay (Railway)
 
-**The web client needs a relay.** Buzz is self-hosted by design: the client talks
-to *your* relay, and with no configuration it assumes the relay is on the same
-origin it was served from. A Vercel deployment is static hosting, so the UI loads
-but has no relay behind it until you set `VITE_RELAY_URL` (a build-time Vite
-variable — set it in Vercel → Settings → Environment Variables, then redeploy) to
-a Buzz relay's WebSocket URL, e.g. `wss://relay.example.com`.
+Buzz is self-hosted by design — the client talks to *your* relay, and unconfigured
+it assumes the relay shares its origin. Vercel is static hosting, so the client
+needs a relay pointed at explicitly.
 
-**Upstream's CI is disabled here.** The fork inherited 12 workflows from Block —
+Railway project **`buzz-relay`** → **wss://relay-production-61de.up.railway.app**
+
+| Service    | Image                    | Volume                  | Notes                                   |
+| ---------- | ------------------------ | ----------------------- | --------------------------------------- |
+| `relay`    | `ghcr.io/block/buzz:main` | `/data/git`             | public on port 3000                     |
+| `postgres` | `postgres:17-alpine`     | `/var/lib/postgresql/data` | private network only                 |
+| `redis`    | `redis:7-alpine`         | `/data`                 | private network only                    |
+| `minio`    | `minio/minio:latest`     | `/bitnami/minio/data`   | S3 for media + git packs; private only  |
+
+The client reaches it because `VITE_RELAY_URL` is set in Vercel. It is a *build-time*
+Vite variable, so changing it requires a redeploy, not just a settings save.
+
+### Things that will bite you here
+
+- **`RAILWAY_RUN_UID=0` is load-bearing.** The Buzz image runs as `buzz` (uid 1000)
+  and Railway mounts volumes root-owned, so without it the relay dies on boot with
+  `BUZZ_GIT_PACK_CACHE_PATH … Permission denied`.
+- **Redis's password is written literally into its start command.** Railway did not
+  expand `$REDIS_PASSWORD` there, and the relay failed auth against a Redis that had
+  taken the unexpanded string as its password.
+- **MinIO's data dir is the volume mount path**, and `buzz-media` is a plain
+  directory inside it — MinIO's filesystem backend treats a top-level directory as a
+  bucket, which replaces the `mc mb` init container upstream's compose uses.
+- **Railway's native Storage Buckets did not work** — `bucketCreate` succeeds but the
+  bucket instance never provisions, so `bucketS3Credentials` returns
+  `BucketInstance not found`. Hence MinIO.
+- **`BUZZ_GIT_CONFORMANCE_PROBE=true` is a genuine health gate.** The relay refuses
+  to start unless it can round-trip an object through S3, so a clean boot proves the
+  storage wiring rather than merely suggesting it.
+
+### Secrets
+
+Generated at setup, stored only in Railway's env vars (`buzz-relay` → each service →
+Variables): `POSTGRES_PASSWORD`, `REDIS_PASSWORD`, `BUZZ_RELAY_PRIVATE_KEY`,
+`BUZZ_GIT_HOOK_HMAC_SECRET`, `BUZZ_S3_ACCESS_KEY` / `BUZZ_S3_SECRET_KEY`.
+
+The **relay owner identity** — the account that administers the relay — is at
+`C:\Users\arno_\.buzz-relay-owner-key.txt`. Import that `nsec` into the Buzz client
+to act as owner. `RELAY_OWNER_PUBKEY` on the relay is its public half; the relay
+runs in closed mode (`BUZZ_REQUIRE_RELAY_MEMBERSHIP=true`) and refuses to boot
+without a valid one.
+
+## Upstream's CI is disabled here
+
+The fork inherited 12 workflows from Block —
 Rust CI, Docker publishing, Helm charts, signed macOS/Windows canaries. They fire
 on every push, need secrets this account doesn't have, and burn Actions minutes.
 All 12 are disabled; only `Sync fork with upstream` is active. Re-enable any of
