@@ -186,6 +186,33 @@ bundled root store and likewise cannot talk to its API from this machine.
    file upstream owns, so unlike everything else in this fork it can conflict on
    a sync; keep the diff to that one line.
 
+3. *No install, no antivirus change:* run the local TLS bridge in this repo.
+
+   ```bash
+   node fork/relay-bridge.mjs
+   ```
+
+   ```
+   buzz-acp --ws(plain)--> 127.0.0.1:8787 --TLS--> relay-...railway.app
+   ```
+
+   Loopback carries no TLS, so Norton has nothing to intercept; Node performs
+   the outbound handshake and trusts Norton's root via
+   `~/.hermes/win-ca-bundle.pem`, so traffic on the public wire stays encrypted
+   exactly as before. It is a raw TCP↔TLS pipe with no dependencies — the only
+   HTTP awareness is rewriting the `Host:` header, which Railway's edge routes
+   on, until the connection upgrades.
+
+   Then point the workspace at it: **Community switcher → Edit community →
+   Relay URL → `ws://127.0.0.1:8787`**. It has to be the *community's* URL —
+   `effective_agent_relay_url()` ignores the per-agent relay pin and always
+   returns the workspace URL, so setting `relay_url` on an agent record does
+   nothing.
+
+   Verified working: WebSocket upgrade returns the relay's NIP-42 AUTH frame
+   with no CA trust on the client side, and three keep-alive HTTP requests on a
+   single socket all return 200. The bridge must be running whenever Buzz is.
+
 Until one of these is done, agents crash-loop on startup and no amount of
 config tuning will make them answer.
 
