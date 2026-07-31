@@ -325,10 +325,34 @@ override the first if a future measurement ever justifies it. Nothing here
 justifies it today.
 
 **The pool spawns lazily on first message**, not at launch, which is why the
-first turn costs 33.9 s against a 13 s warm one. `BUZZ_ACP_HEARTBEAT_INTERVAL`
-looks like the fix and is not: `lib.rs` logs `heartbeat_skipped_pool_not_ready`,
-so heartbeats only run once the pool already exists. It cannot pre-warm the
-thing it depends on, and it self-prompts, which risks channel noise.
+first turn costs 33.9 s against a 13 s warm one. This matters more than the warm
+number: the original 99 s and 59 s were both *first* messages, so the cold path
+is the one actually experienced.
+
+`BUZZ_ACP_HEARTBEAT_INTERVAL` looks like the fix and is not — `lib.rs` logs
+`heartbeat_skipped_pool_not_ready`, so heartbeats only run once the pool already
+exists. It cannot pre-warm the thing it depends on, and it self-prompts, which
+risks channel noise.
+
+The actual control is **`BUZZ_ACP_LAZY_POOL`**. `runtime.rs:582` sets it from a
+per-spawn flag, it is **not** in `RESERVED_ENV_KEYS`, and it is written before
+user `env_vars` at ~860 — so a global override wins, exactly as the pool cap
+does. Set in `global-agent-config.json`:
+
+```json
+{ "env_vars": { "BUZZ_ACP_AGENTS": "2", "BUZZ_ACP_LAZY_POOL": "false" } }
+```
+
+Takes effect on the next agent spawn (restart Buzz). The pool is then built at
+launch instead of being charged to the first message.
+
+`CLAUDE_CODE_EFFORT_LEVEL` / `BUZZ_AGENT_THINKING_EFFORT` were **removed** from
+that file. They were measured as noise and only cost answer quality.
+
+Untested candidates, both of which trade capability for latency and so were left
+alone: `BUZZ_ACP_CONTEXT_MESSAGE_LIMIT` (12 — pre-prompt history fetched per
+turn; lowering it gives the agent less conversation to work with) and
+`BUZZ_ACP_NO_MEMORY` (skips `[Agent Memory — core]` injection).
 
 **So ~9 s of the 13 s is buzz-acp and relay overhead**, against a ~3.8 s warm
 model turn. That is the remaining target, and it is not reachable from
