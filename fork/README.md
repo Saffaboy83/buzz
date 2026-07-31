@@ -367,8 +367,29 @@ BUZZ_ACP_AGENTS=2 BUZZ_ACP_LAZY_POOL=false RUST_LOG=info \
 The relay connect fails on a throwaway key — irrelevant, the pool ordering is
 already decided by then.
 
-`CLAUDE_CODE_EFFORT_LEVEL` / `BUZZ_AGENT_THINKING_EFFORT` were **removed** from
-that file. They were measured as noise and only cost answer quality.
+### Effort level: measure it against the model the agent actually runs
+
+`CLAUDE_CODE_EFFORT_LEVEL` was first measured through the local `claude` CLI,
+came out as noise (12.2 s vs 12.7 s), and was removed. That inference was wrong:
+the CLI runs a different model than the agent. Fabey runs **`claude-fable-5`**,
+a reasoning model. Re-measured against *that*, n=3 per cell:
+
+| fable-5 | first turn | warm turn |
+| --- | --- | --- |
+| default effort | 8.5 / 6.1 / 6.9 s — median **6.9 s** | 4.1 / 3.4 / 4.8 s — median **4.1 s** |
+| `effort=low` | 3.5 / 3.2 / 5.3 s — median **3.5 s** | 3.9 / 6.0 / 4.4 s — median **4.4 s** |
+
+It halves the **first** turn and does nothing for warm ones — consistent with a
+reasoning model spending its budget on the opening exchange. Worth having for a
+chat persona, since the first turn is the one a human waits on.
+
+It is a genuine trade for agents doing real work: less reasoning budget is less
+reasoning. Set it per-agent rather than globally if the same install runs both
+chat personas and coding agents.
+
+**Method note, learned the hard way twice in one session:** measure against the
+model in production, and take three samples. Both wrong conclusions here came
+from skipping one of those.
 
 Untested candidates, both of which trade capability for latency and so were left
 alone: `BUZZ_ACP_CONTEXT_MESSAGE_LIMIT` (12 — pre-prompt history fetched per
