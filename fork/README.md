@@ -276,6 +276,14 @@ the running app rather than inferred:
 { "env_vars": { "BUZZ_ACP_AGENTS": "2", "BUZZ_ACP_LAZY_POOL": "false" } }
 ```
 
+A third is set but **not yet confirmed live**: `CLAUDE_CODE_EFFORT_LEVEL: "low"`.
+In isolation against `fable-5` it halves the first turn (6.9 s → 3.5 s, n=3), and
+the one live sample taken before Buzz was closed came in at 9.2 s against a
+10.2 s median. That is one sample — treat it as unproven until three more say so.
+It is safe to leave on: `CLAUDE_CODE_EFFORT_LEVEL` is read only by the **claude**
+runtime bridge (`config_bridge/claude.rs`), so the codex agent running
+`gpt-5.6-sol` never sees it. Remove that one key to revert.
+
 The agent picks these up **without restarting Buzz** — `auto_restart_on_config_change`
 respawns it on a config write. Confirmed in the log: config written 03:36:44,
 agent restarted 03:39:08, `agent_pool_ready agents=2` at 03:39:10 — 1.9 s after
