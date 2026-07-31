@@ -332,8 +332,21 @@ thing it depends on, and it self-prompts, which risks channel noise.
 
 **So ~9 s of the 13 s is buzz-acp and relay overhead**, against a ~3.8 s warm
 model turn. That is the remaining target, and it is not reachable from
-configuration — it needs profiling inside `buzz-acp`'s per-turn path
-(context fetch, event round-trips) rather than another env var.
+configuration.
+
+Cross-checked against the possibility that the 13 s was an artifact of polling
+`/query` (which would conflate agent latency with read-path indexing lag).
+Measuring instead over a NIP-42-authed WebSocket subscription — the transport
+the desktop client actually receives replies on — gives **12.9 / 13.8 / 10.2 s**,
+median 12.9 s. Same answer. The latency is real, not instrumentation.
+
+Config levers that were checked and do not exist: there is no debounce,
+coalescing or settle window in the dispatch path. The only fixed delays in
+`lib.rs` are a 167 ms observer publish interval and a 500 ms flush interval;
+everything else on that path is timeout, retry, liveness or respawn backoff.
+Closing the remaining gap means profiling the per-turn path in `buzz-acp`
+(context fetch, ACP round-trips, publish) — a code change to a file upstream
+owns, and therefore the one change in this fork that could conflict on a sync.
 
 ### Ruled out, with numbers
 
