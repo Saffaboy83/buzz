@@ -300,37 +300,40 @@ measured rather than assumed:
 Two levers are left, both measured, and both cost something — neither is free
 speed, which is why neither was applied unilaterally.
 
-**1. The 28 KB system prompt costs ~3.1 s on every turn.** Same harness, same
-`cwd`, only the prompt differs:
+**The system prompt is NOT the lever — measure twice before trading it away.**
+A single sample said the 28 KB prompt cost 3.1 s per turn, which would have
+justified cutting the `buzz-cli` skill. Repeating it showed that number was
+noise:
 
-| | warm turn |
-| --- | --- |
-| no system prompt | 3.8 s |
-| the real 28 KB prompt | 6.9 s |
+| system prompt | warm turn, run 1 | warm turn, run 2 |
+| --- | --- | --- |
+| none | 3.81 s | 3.57 s |
+| `base_prompt.md` only (13.7 KB) | **7.30 s** | **3.87 s** |
+| trimmed to 7.3 KB | — | 3.60 s |
 
-It is assembled from three places, and only the first is injected over ACP:
+Identical configuration varying by 2x. Prompt caching is working; halving the
+prompt buys **0.27 s**. Any per-turn conclusion drawn from one sample here is
+worthless — take at least three.
 
-| Source | Size |
-| --- | --- |
-| `base_prompt.md` (via `systemPrompt`) | 13,734 B |
-| `~/.buzz/AGENTS.md` (read from cwd) | 3,828 B |
-| `~/.buzz/.agents/skills/buzz-cli/SKILL.md` | 11,014 B |
+For the record, since it is easy to re-derive wrongly: the ~28 KB an agent
+carries comes from `base_prompt.md` (13,734 B, injected via `systemPrompt`),
+`~/.buzz/AGENTS.md` (3,828 B) and `~/.buzz/.agents/skills/buzz-cli/SKILL.md`
+(11,014 B), the last two read from the working directory. Adding the skill on
+top of the base prompt costs nothing measurable — it is progressively
+disclosed, not pasted into every turn. `BUZZ_ACP_BASE_PROMPT_FILE` will
+override the first if a future measurement ever justifies it. Nothing here
+justifies it today.
 
-`BUZZ_ACP_BASE_PROMPT_FILE` can point the first one at something smaller. The
-other two are written to disk by `nest.rs` and restored whenever
-`NEST_SKILL_VERSION` / `NEST_AGENTS_VERSION` outranks the version file, so
-deleting them is not durable.
-
-The catch: that 11 KB skill is what teaches an agent to drive the `buzz` CLI —
-clone repos, open PRs, push patches. Trimming it makes "hi" faster and makes the
-agent worse at the work it exists to do. Worth it for a chat-only persona,
-wrong for a working one.
-
-**2. The pool spawns lazily on first message**, not at launch, which is why the
+**The pool spawns lazily on first message**, not at launch, which is why the
 first turn costs 33.9 s against a 13 s warm one. `BUZZ_ACP_HEARTBEAT_INTERVAL`
-(default `0`, disabled) sends periodic prompts and would keep both the pool and
-the session warm. It costs tokens continuously in exchange for never paying the
-cold start.
+looks like the fix and is not: `lib.rs` logs `heartbeat_skipped_pool_not_ready`,
+so heartbeats only run once the pool already exists. It cannot pre-warm the
+thing it depends on, and it self-prompts, which risks channel noise.
+
+**So ~9 s of the 13 s is buzz-acp and relay overhead**, against a ~3.8 s warm
+model turn. That is the remaining target, and it is not reachable from
+configuration — it needs profiling inside `buzz-acp`'s per-turn path
+(context fetch, event round-trips) rather than another env var.
 
 ### Ruled out, with numbers
 
