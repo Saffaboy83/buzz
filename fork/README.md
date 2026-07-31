@@ -346,6 +346,27 @@ does. Set in `global-agent-config.json`:
 Takes effect on the next agent spawn (restart Buzz). The pool is then built at
 launch instead of being charged to the first message.
 
+Verified in isolation rather than assumed — `buzz-acp` run directly with a
+throwaway key, which reaches the pool-spawn decision before it ever needs to be
+a relay member:
+
+| | order of operations |
+| --- | --- |
+| `LAZY_POOL=false` | `agent initialized agent=0` → `agent=1` → `agent_pool_ready agents=2` → then connect |
+| `LAZY_POOL=true` | connect first, no pool built |
+
+Reproduce with:
+
+```bash
+BUZZ_PRIVATE_KEY=<nsec> BUZZ_RELAY_URL=<wss://…> \
+BUZZ_ACP_AGENT_COMMAND=<…/claude-agent-acp.cmd> \
+BUZZ_ACP_AGENTS=2 BUZZ_ACP_LAZY_POOL=false RUST_LOG=info \
+"%LOCALAPPDATA%/Buzz/buzz-acp.exe"
+```
+
+The relay connect fails on a throwaway key — irrelevant, the pool ordering is
+already decided by then.
+
 `CLAUDE_CODE_EFFORT_LEVEL` / `BUZZ_AGENT_THINKING_EFFORT` were **removed** from
 that file. They were measured as noise and only cost answer quality.
 
