@@ -295,9 +295,54 @@ measured rather than assumed:
 - Relay latency — 108 ms median HTTP RTT, ~200 ms WSS connect-to-AUTH. Never a
   factor at this scale.
 
-One real lever is still untested: the pool spawns **lazily on first message**,
-not at launch, which is why the first turn costs 33.9 s instead of 13 s.
-Pre-warming it would make the first message feel like every other one.
+### Where the remaining seconds are
+
+Two levers are left, both measured, and both cost something — neither is free
+speed, which is why neither was applied unilaterally.
+
+**1. The 28 KB system prompt costs ~3.1 s on every turn.** Same harness, same
+`cwd`, only the prompt differs:
+
+| | warm turn |
+| --- | --- |
+| no system prompt | 3.8 s |
+| the real 28 KB prompt | 6.9 s |
+
+It is assembled from three places, and only the first is injected over ACP:
+
+| Source | Size |
+| --- | --- |
+| `base_prompt.md` (via `systemPrompt`) | 13,734 B |
+| `~/.buzz/AGENTS.md` (read from cwd) | 3,828 B |
+| `~/.buzz/.agents/skills/buzz-cli/SKILL.md` | 11,014 B |
+
+`BUZZ_ACP_BASE_PROMPT_FILE` can point the first one at something smaller. The
+other two are written to disk by `nest.rs` and restored whenever
+`NEST_SKILL_VERSION` / `NEST_AGENTS_VERSION` outranks the version file, so
+deleting them is not durable.
+
+The catch: that 11 KB skill is what teaches an agent to drive the `buzz` CLI —
+clone repos, open PRs, push patches. Trimming it makes "hi" faster and makes the
+agent worse at the work it exists to do. Worth it for a chat-only persona,
+wrong for a working one.
+
+**2. The pool spawns lazily on first message**, not at launch, which is why the
+first turn costs 33.9 s against a 13 s warm one. `BUZZ_ACP_HEARTBEAT_INTERVAL`
+(default `0`, disabled) sends periodic prompts and would keep both the pool and
+the session warm. It costs tokens continuously in exchange for never paying the
+cold start.
+
+### Ruled out, with numbers
+
+Recorded so none of these get re-litigated:
+
+| Suspect | Verdict |
+| --- | --- |
+| Relay latency | 108 ms median RTT — never a factor |
+| Norton TLS interception | agents connect fine *with* Norton re-signing; it broke `buzz-acp` startup, never turn latency |
+| `CLAUDE_CODE_EFFORT_LEVEL=low` | 12.2 s vs 12.7 s — noise, and it costs answer quality |
+| Agent working directory | already `~/.buzz` (14 entries), not a large repo |
+| Session churn | `channel_id → session_id` is cached; sessions are reused |
 
 Re-apply any time (with the app closed) — it is idempotent:
 
