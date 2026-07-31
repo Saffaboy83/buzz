@@ -186,35 +186,41 @@ bundled root store and likewise cannot talk to its API from this machine.
    file upstream owns, so unlike everything else in this fork it can conflict on
    a sync; keep the diff to that one line.
 
-3. *No install, no antivirus change:* run the local TLS bridge in this repo.
-
-   ```bash
-   node fork/relay-bridge.mjs
-   ```
-
-   ```
-   buzz-acp --ws(plain)--> 127.0.0.1:8787 --TLS--> relay-...railway.app
-   ```
-
-   Loopback carries no TLS, so Norton has nothing to intercept; Node performs
-   the outbound handshake and trusts Norton's root via
-   `~/.hermes/win-ca-bundle.pem`, so traffic on the public wire stays encrypted
-   exactly as before. It is a raw TCP↔TLS pipe with no dependencies — the only
-   HTTP awareness is rewriting the `Host:` header, which Railway's edge routes
-   on, until the connection upgrades.
-
-   Then point the workspace at it: **Community switcher → Edit community →
-   Relay URL → `ws://127.0.0.1:8787`**. It has to be the *community's* URL —
-   `effective_agent_relay_url()` ignores the per-agent relay pin and always
-   returns the workspace URL, so setting `relay_url` on an agent record does
-   nothing.
-
-   Verified working: WebSocket upgrade returns the relay's NIP-42 AUTH frame
-   with no CA trust on the client side, and three keep-alive HTTP requests on a
-   single socket all return 200. The bridge must be running whenever Buzz is.
-
 Until one of these is done, agents crash-loop on startup and no amount of
 config tuning will make them answer.
+
+### The local TLS proxy is a dead end — do not build one
+
+This looks like the obvious third option, and it was tried and removed: run a
+loopback proxy so Node terminates TLS (it trusts Norton via
+`NODE_EXTRA_CA_CERTS`) and re-exposes plain `ws://127.0.0.1:8787`, then point
+the workspace at that.
+
+The transport works — the WebSocket upgrade returns the relay's NIP-42 AUTH
+frame with no CA trust on the client side, and keep-alive HTTP requests return
+200. **Authentication is what fails**, and only once a real read is attempted:
+
+```
+relay returned 401 Unauthorized: NIP-98 HTTP Auth verification failed:
+URL mismatch: event has `http://127.0.0.1:8787/query`,
+              expected `https://relay-production-61de.up.railway.app/query`
+```
+
+Buzz signs the relay URL *into* its auth events, so a proxy would have to
+re-sign them — which needs the private key. Specifically:
+
+- `nip98_expected_url()` in `crates/buzz-relay/src/api/bridge.rs` builds the
+  expected URL as `{scheme}://{tenant.host()}{path}`, with the scheme pinned to
+  the deployment's TLS posture. A client reached over `ws://` derives `http://`
+  and can never match an `https://` deployment.
+- A test in that same file deliberately keeps the derivation independent of
+  request headers (it calls a header-derived version a "host-binding side
+  door"), so no `X-Forwarded-Proto` / `X-Forwarded-Host` trick helps.
+- Routing *only* the agents through the proxy does not save it either.
+  `buzz-acp` depends on `reqwest` and does all reads via `POST /query` and all
+  writes via `POST /events`, both NIP-98 authed — it is not WebSocket-only.
+
+Fix the trust store (option 1 or 2). There is no transport-level workaround.
 
 ## Desktop agent latency
 
@@ -244,6 +250,54 @@ Applied in `%APPDATA%\xyz.block.buzz.app\agents\` (backups alongside, suffixed
 | `start_on_app_launch` | false | true (Fabey) | pool spawn is paid at launch, not charged to your first message |
 
 Worst case went from **110 processes to 12**; in practice 3.
+
+### Measured, before and after
+
+Baseline came off the wire, not from a stopwatch — the channel's own kind-9
+events carry `created_at`, so the original turns are recoverable:
+
+| Turn | Sent | Replied | Latency |
+| --- | --- | --- | --- |
+| `@Fabey hi` | 03:27:41 | 03:29:20 | **99 s** |
+| `@Fizz hi` | 03:31:08 | 03:32:07 | **59 s** |
+
+After tuning, measured by posting as the owner through the HTTP bridge and
+polling for the reply. Each prompt carries a unique token the reply must echo —
+without that, a late reply from the previous turn gets matched and reports an
+impossible 1.6 s:
+
+| Turn | Latency |
+| --- | --- |
+| first message (cold — pool spawns lazily) | 33.9 s |
+| warm | 16.3 s |
+| warm | 11.4 s |
+| warm | 13.0 s |
+
+**Warm median 13 s, against a 59–99 s baseline: roughly 5–8x.** The log confirms
+the cap took effect — `agent_pool_ready agents=2`, down from `agents=10`.
+
+Not the full 10x, and the remaining gap is understood rather than mysterious.
+Driving the same harness directly over ACP (`initialize` → `session/new` →
+`session/prompt`) costs:
+
+| Phase | Cost |
+| --- | --- |
+| spawn + init | 0.4 s |
+| `session/new` | 7.0 s |
+| the model turn itself | 4.3 s |
+
+So ~4 s of the 13 s is the model and ~9 s is Buzz overhead. Closing that means
+attacking `session/new`, not the pool. Two things that did **not** help, both
+measured rather than assumed:
+
+- `CLAUDE_CODE_EFFORT_LEVEL=low` — 12.2 s vs 12.7 s at default. Noise. It buys
+  nothing and costs answer quality, so it is not worth keeping.
+- Relay latency — 108 ms median HTTP RTT, ~200 ms WSS connect-to-AUTH. Never a
+  factor at this scale.
+
+One real lever is still untested: the pool spawns **lazily on first message**,
+not at launch, which is why the first turn costs 33.9 s instead of 13 s.
+Pre-warming it would make the first message feel like every other one.
 
 Re-apply any time (with the app closed) — it is idempotent:
 
