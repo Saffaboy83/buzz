@@ -251,7 +251,41 @@ Applied in `%APPDATA%\xyz.block.buzz.app\agents\` (backups alongside, suffixed
 
 Worst case went from **110 processes to 12**; in practice 3.
 
-### Measured, before and after
+### Result
+
+| | before | after | |
+| --- | --- | --- | --- |
+| first message ("hi") | **99 s** | **10.2 s** | **9.7x** |
+| steady state | ~59–99 s | **10.6 s** | |
+
+After, n=3 each, measured over a NIP-42 WebSocket subscription (the transport
+the desktop actually receives on), each prompt carrying a token the reply must
+echo:
+
+- cold: 10.0 / 10.2 / 11.5 s — median **10.2 s**
+- warm: 10.6 / 9.8 / 13.4 s — median **10.6 s**
+
+Cold and warm are now the same number. That is the point of pre-warming: the
+first message stops costing more than any other, so there is no longer a 34 s
+opening turn followed by 13 s ones.
+
+Two settings did it, both in `global-agent-config.json`, both verified live in
+the running app rather than inferred:
+
+```json
+{ "env_vars": { "BUZZ_ACP_AGENTS": "2", "BUZZ_ACP_LAZY_POOL": "false" } }
+```
+
+The agent picks these up **without restarting Buzz** — `auto_restart_on_config_change`
+respawns it on a config write. Confirmed in the log: config written 03:36:44,
+agent restarted 03:39:08, `agent_pool_ready agents=2` at 03:39:10 — 1.9 s after
+launch and *before* the relay connect, where it used to appear only when the
+first message arrived.
+
+That also makes cold-path measurement repeatable: rewrite the config file to bump
+its mtime, wait for a fresh `agent_pool_ready`, then time one message.
+
+### How it was measured, before and after
 
 Baseline came off the wire, not from a stopwatch — the channel's own kind-9
 events carry `created_at`, so the original turns are recoverable:
