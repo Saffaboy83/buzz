@@ -1,10 +1,17 @@
 # Fork-local workflow (not from block/buzz).
 # Keeps Saffaboy83/buzz current with upstream block/buzz.
 #
-# Strategy: use GitHub's native merge-upstream API rather than a git push.
-# A push made with GITHUB_TOKEN is refused when the commit touches
-# .github/workflows/**, and upstream changes those files regularly.
-# merge-upstream is performed server-side by GitHub, so it sidesteps that.
+# Two sync paths, picked by whether the SYNC_TOKEN secret exists:
+#
+#   1. SYNC_TOKEN set (a fine-grained PAT with Contents + Workflows write on
+#      this repo): a real git merge + push. Carries .github/workflows/**
+#      changes, which upstream touches regularly — this is the durable path.
+#   2. No SYNC_TOKEN: GitHub's native merge-upstream API under GITHUB_TOKEN.
+#      Server-side, but refuses any merge touching workflow files (HTTP 422).
+#
+# Either way, a real merge fires the Vercel deploy hook: the merge commit is
+# bot-authored and Vercel's Hobby plan refuses to build commits not tied to
+# the account, so the push alone never deploys.
 name: Sync fork with upstream
 
 on:
@@ -25,34 +32,74 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN || github.token }}
+
       - name: Sync main from upstream
         id: sync
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SYNC_TOKEN: ${{ secrets.SYNC_TOKEN }}
           REPO: ${{ github.repository }}
         run: |
-          body=$(gh api -X POST "repos/$REPO/merge-upstream" -f branch=main 2>&1) || true
-          echo "response: $body"
-
-          if echo "$body" | grep -q '"merge_type"'; then
-            merge_type=$(echo "$body" | sed -n 's/.*"merge_type": *"\([^"]*\)".*/\1/p')
-            echo "status=ok" >> "$GITHUB_OUTPUT"
-            echo "merge_type=$merge_type" >> "$GITHUB_OUTPUT"
-            echo "::notice::Sync succeeded (merge_type=$merge_type)"
-          else
+          fail() {
             echo "status=failed" >> "$GITHUB_OUTPUT"
             {
               echo "detail<<VERBATIM_EOF"
-              echo "$body"
+              echo "$1"
               echo "VERBATIM_EOF"
             } >> "$GITHUB_OUTPUT"
             echo "::error::Sync failed — see the issue opened by the next step."
+          }
+
+          if [ -n "$SYNC_TOKEN" ]; then
+            echo "path: git merge (SYNC_TOKEN present)"
+            git remote add upstream https://github.com/block/buzz.git
+            git fetch upstream main --no-tags
+
+            behind=$(git rev-list --count HEAD..upstream/main)
+            if [ "$behind" -eq 0 ]; then
+              echo "status=ok" >> "$GITHUB_OUTPUT"
+              echo "merge_type=none" >> "$GITHUB_OUTPUT"
+              echo "::notice::Already up to date with upstream."
+              exit 0
+            fi
+
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            if ! git merge --no-edit upstream/main; then
+              git merge --abort || true
+              fail "git merge of $behind upstream commit(s) hit conflicts; resolve locally with fork/sync-upstream.ps1"
+              exit 0
+            fi
+
+            if ! pushout=$(git push origin main 2>&1); then
+              fail "git push failed: $pushout"
+              exit 0
+            fi
+            echo "status=ok" >> "$GITHUB_OUTPUT"
+            echo "merge_type=merge" >> "$GITHUB_OUTPUT"
+            echo "::notice::Merged $behind upstream commit(s) and pushed."
+          else
+            echo "path: merge-upstream API (no SYNC_TOKEN)"
+            body=$(gh api -X POST "repos/$REPO/merge-upstream" -f branch=main 2>&1) || true
+            echo "response: $body"
+
+            if echo "$body" | grep -q '"merge_type"'; then
+              merge_type=$(echo "$body" | sed -n 's/.*"merge_type": *"\([^"]*\)".*/\1/p')
+              echo "status=ok" >> "$GITHUB_OUTPUT"
+              echo "merge_type=$merge_type" >> "$GITHUB_OUTPUT"
+              echo "::notice::Sync succeeded (merge_type=$merge_type)"
+            else
+              fail "$body"
+            fi
           fi
 
-      # The merge commit this workflow creates is authored by github-actions[bot].
-      # Vercel's Hobby plan refuses to build a commit whose author is not tied to
-      # the account, so the push alone will not deploy. A deploy hook is not
-      # author-scoped, so it always builds current main.
+      # A deploy hook is not author-scoped, so it always builds current main.
       - name: Trigger the Vercel production deploy
         if: steps.sync.outputs.status == 'ok' && steps.sync.outputs.merge_type != 'none'
         env:
@@ -84,12 +131,16 @@ jobs:
             echo "$DETAIL"
             echo '```'
             echo
-            echo 'Resolve it locally — that path uses a token with the `workflow` scope, which the Actions token lacks:'
+            echo 'Resolve it locally:'
             echo
             echo '```powershell'
             echo 'cd C:\Users\arno_\Buzz'
             echo '.\fork\sync-upstream.ps1'
             echo '```'
+            echo
+            echo 'If the error above is HTTP 422 about workflow files, the SYNC_TOKEN'
+            echo 'secret is missing or expired — mint a fine-grained PAT (Contents +'
+            echo 'Workflows write on this repo) and `gh secret set SYNC_TOKEN`.'
             echo
             echo "Run: $RUN_URL"
           } > issue-body.md

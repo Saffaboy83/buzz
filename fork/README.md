@@ -20,10 +20,13 @@ absent-minded `git push upstream` fails instead of opening a PR against Block.
 Three ways, in order of least effort:
 
 **1. Automatic (nothing to do).** `.github/workflows/sync-upstream.yml` runs daily
-at 06:17 UTC and merges `block/buzz@main` into this fork's `main` using GitHub's
-`merge-upstream` API. A successful sync pushes to `main`, which triggers a Vercel
-production deploy. If it can't resolve the merge, it opens an issue labelled
-`upstream-sync` instead of failing silently.
+at 06:17 UTC. With the `SYNC_TOKEN` secret set (a fine-grained PAT with Contents +
+Workflows write on this repo) it does a real git merge + push, which carries
+`.github/workflows/**` changes — the durable path. Without it, it falls back to
+GitHub's `merge-upstream` API, which 422s whenever upstream touched a workflow
+file. A real merge fires the Vercel deploy hook. If the sync can't complete, it
+opens an issue labelled `upstream-sync` — which only works while repo issues stay
+enabled.
 
 **2. On demand, locally.** From `C:\Users\arno_\Buzz`:
 
@@ -80,7 +83,14 @@ It builds from the repo root using `/vercel.json`:
 - install: `pnpm install --frozen-lockfile` (workspace root, so the patches apply)
 - build: `pnpm --filter buzz-web build`
 - output: `web/dist`
-- SPA rewrite so TanStack Router deep links survive a refresh
+- SPA rewrite so TanStack Router deep links survive a refresh — with `/assets/`
+  **excluded** (added 2026-08-02) so a missing bundle 404s instead of returning
+  the app HTML with a 200, which would disguise a stale-cache incident as a
+  white screen
+- `web/public/favicon.ico` is fork-local (upstream ships no favicon; browsers
+  request `/favicon.ico` unprompted, so no `index.html` edit was needed —
+  Vite copies `public/` to the dist root). The one additive file under a
+  directory upstream owns; conflicts only if upstream ever adds the same path.
 - Node pinned to 22.x; `ENABLE_EXPERIMENTAL_COREPACK=1` so Vercel honours
   `packageManager: pnpm@11.4.0` instead of falling back to its own pnpm
 
