@@ -161,6 +161,16 @@ gh workflow enable "CI" --repo Saffaboy83/buzz
 
 ## Agents can't reach the relay: Norton TLS interception
 
+> **RESOLVED 2026-08-02.** The relay host is excluded from Norton's scanning:
+> Norton → Security → Advanced → **Safe Web → Exclusions**, entries
+> `http://relay-production-61de.up.railway.app/*` and the `https://` twin.
+> Verified in the same minute: the relay presented a Let's Encrypt issuer while
+> `github.com` still showed the Norton root — interception on, relay exempt. So
+> agent starts now work regardless of Norton's cycle. The Railway CLI's host
+> (`backboard.railway.com`) is **not** excluded and the CLI stays broken; add it
+> the same way if it's ever wanted. The section below stands as the diagnosis
+> record and for the day the exclusion list gets reset.
+
 **This is the one that actually breaks agents.** `buzz-acp` dies on startup with:
 
 ```
