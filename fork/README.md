@@ -40,6 +40,37 @@ merge touching `.github/workflows/**` can only be completed from here.
 option 1. Do **not** use its "Discard commits" option — that deletes the fork-local
 deploy config.
 
+### The 2026-08-02 incident: three days of silent drift
+
+The scheduled sync failed on Jul 31, Aug 1, and Aug 2 — upstream had touched
+`.github/workflows/**` (7 commits' worth), which the Actions `GITHUB_TOKEN`
+cannot merge (HTTP 422, `workflows` permission). That is the *known* failure the
+issue-alert was designed for. What made it silent: **issues were disabled on the
+repo**, so `gh issue create` died and the alert was swallowed. Two stacked
+defects — the second hid the first for 3.2 days / 76 commits.
+
+Repairs applied 2026-08-02, all verified:
+
+- **Issues are enabled and must stay enabled** (`gh api -X PATCH repos/Saffaboy83/buzz -F has_issues=true`).
+  The failure path has no other channel — no issue-writes means no alert at all.
+- Backlog cleared with `.\fork\sync-upstream.ps1` (merge `7a8d942f6`, clean, pushed).
+- **A synced-in workflow arrives *active*.** Upstream's new
+  `desktop-release-candidate.yml` registered itself active on push and had to be
+  disabled to restore the only-sync-active invariant. After any sync that adds a
+  workflow file, run `gh workflow list --repo Saffaboy83/buzz --all | grep -i active`.
+- Post-repair dispatch run: green, 10s, no-op — the pipe works when nothing blocks it.
+
+Still true afterwards: the scheduled Action will 422 again the next time upstream
+touches a workflow file — that class is structural to `GITHUB_TOKEN`. The issue
+alert now fires when it happens, and the fix is the local script. The durable fix
+would be a fine-grained PAT with `workflow` scope stored as a repo secret and a
+git-based merge in the Action; not done — minting that PAT is a manual step.
+
+Also observed, harmless but worth knowing: the 06:17 UTC cron actually starts
+08:35–09:19 UTC (GitHub scheduler queue delay), and the deploy-hook step has
+never yet executed for real — every genuine merge so far has been pushed locally
+(user-authored commits deploy via git integration, so the hook wasn't needed).
+
 ## Deployment
 
 Vercel project `buzz` → **https://buzz-eta-five.vercel.app**
@@ -166,21 +197,32 @@ bundled root store and likewise cannot talk to its API from this machine.
 
 ### It toggles, and while it is on nothing else about agents can be measured
 
-Re-checked 2026-08-02. Interception is **not** constant, which is why this looked
-inconsistent at first:
+Re-checked 2026-08-02 (twice — the second pass corrected the first). Interception
+is **not** constant, and it cycles on a shorter period than this table first
+implied:
 
 | Window (UTC) | Agent starts | Outcome |
 | --- | --- | --- |
 | 2026-07-30 03:25 | 1 | connected, subscribed to the channel |
 | 2026-07-30 04:24 → 11:31 | 3 | every one died on `invalid peer certificate` |
 | 2026-07-31 02:50 → 04:00 | 4 | connected, subscribed, answered — all the good numbers came from here |
-| 2026-07-31 04:06 → 2026-08-02 17:00 | 6 | every one died on `invalid peer certificate` |
+| 2026-07-31 04:06 → 2026-08-02 17:11 | 10 | every one died on `invalid peer certificate` |
+| 2026-08-02 17:24 → 17:55 | 4 | connected, subscribed — a ~44-minute clean window |
+| 2026-08-02 by 18:03 | — | interception re-engaged (`openssl` shows the Norton root again) |
 
 Nothing in Buzz changed across those boundaries. Norton's encrypted-connections
-scanning engages and disengages on its own schedule, and has been on
-continuously since 2026-07-31 04:06. When it is on, `buzz-acp`
+scanning engages and disengages on its own schedule. When it is on, `buzz-acp`
 reaches `agent_pool_ready` and *then* exits on the relay connect, so the symptom
 is "agent silently absent", not "agent slow".
+
+**Established sessions survive interception switching on.** Found 2026-08-02:
+agents that connected during the 17:24–17:55 window kept their websockets and
+kept answering after 18:03, while `openssl` against the same host showed Norton's
+root. Interception only breaks the *handshake*, so "the agents look fine" and
+"openssl says Norton" can both be true at the same moment. The corollary: a
+running agent proves nothing about whether a *new* start would succeed — check
+with `openssl s_client` (issuer = Norton means new starts die), and never
+restart a working agent while interception is on.
 
 It is **host-selective** — Norton keeps its own allowlist. Measured the same day
 with `openssl s_client`:
