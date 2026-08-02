@@ -134,6 +134,20 @@ Vite variable, so changing it requires a redeploy, not just a settings save.
 - **`BUZZ_GIT_CONFORMANCE_PROBE=true` is a genuine health gate.** The relay refuses
   to start unless it can round-trip an object through S3, so a clean boot proves the
   storage wiring rather than merely suggesting it.
+- **MinIO can silently vanish — and did.** Found by the 2026-08-02 audit: minio's
+  deployment had been REMOVED since Jul 30 ~02:44 UTC (minutes *after* the relay
+  booted through the conformance probe) and its volume was gone; postgres, redis
+  and the relay were untouched. Symptom: every upload 500s while media auth
+  correctly 401s bad tokens, each media call stalling ~1 s; GETs 404 because the
+  storage layer swallows backend errors into "not found". Diagnosis is invisible
+  from the relay's HTTP surface — check minio's deployment status first. Rebuilt
+  over the GraphQL API (`volumeCreate` at `/bitnami/minio/data` +
+  `serviceInstanceRedeploy`); the start command's `mkdir -p …/buzz-media`
+  recreated the bucket on the empty volume, and uploads verified live minutes
+  later with **no relay restart** — the S3 client reconnects per request; the
+  boot probe only gates startup. API note: the schema now requires
+  `projects(workspaceId:)` — `me { workspaces { id } }` first, then everything
+  else works as before.
 
 ### Secrets
 
