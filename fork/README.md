@@ -63,16 +63,24 @@ Repairs applied 2026-08-02, all verified:
   workflow file, run `gh workflow list --repo Saffaboy83/buzz --all | grep -i active`.
 - Post-repair dispatch run: green, 10s, no-op — the pipe works when nothing blocks it.
 
-Still true afterwards: the scheduled Action will 422 again the next time upstream
-touches a workflow file — that class is structural to `GITHUB_TOKEN`. The issue
-alert now fires when it happens, and the fix is the local script. The durable fix
-would be a fine-grained PAT with `workflow` scope stored as a repo secret and a
-git-based merge in the Action; not done — minting that PAT is a manual step.
+**Closed same day — the durable fix is in.** `SYNC_TOKEN` (a fine-grained PAT
+scoped to this repo only: Contents + Workflows read/write, minted 2026-08-02) is
+a repo secret, and the workflow does a real git merge + push when it is present,
+falling back to the merge-upstream API without it. Verified live on run
+30762643987: 2 upstream commits touching **10 workflow files** — exactly the
+422 case — merged and pushed in 30 s, and the deploy hook executed for the
+first time (HTTP 201). When the PAT expires the workflow degrades gracefully to
+the API path, and the 422 issue alert names the fix.
 
 Also observed, harmless but worth knowing: the 06:17 UTC cron actually starts
-08:35–09:19 UTC (GitHub scheduler queue delay), and the deploy-hook step has
-never yet executed for real — every genuine merge so far has been pushed locally
-(user-authored commits deploy via git integration, so the hook wasn't needed).
+08:35–09:19 UTC (GitHub scheduler queue delay).
+
+Volume backups on Railway were attempted the same day and are **plan-gated**:
+both scheduled and manual backups return `Not Authorized` on the Hobby plan.
+Options if this matters: upgrade to Pro (then
+`volumeInstanceBackupScheduleUpdate` via GraphQL enables daily/weekly on all
+four volumes), or run an in-project pg_dump sidecar. Until then, the MinIO
+incident above is the cautionary tale: a volume can vanish with no way back.
 
 ## Deployment
 
