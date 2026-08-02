@@ -40,6 +40,10 @@ function nip98(method, url) {
       tags: [
         ["u", url],
         ["method", method],
+        // Without a nonce, two requests in the same second produce the same
+        // event id and the relay 401s the second one ("NIP-98: replay detected").
+        // The relay ignores unknown tags, so this is free.
+        ["nonce", Math.random().toString(36).slice(2)],
       ],
       content: "",
     },
@@ -74,7 +78,7 @@ export function eventsOf(resBody) {
   return [];
 }
 
-if (process.argv[1] && process.argv[1].includes("relay-probe")) {
+if (process.argv[1] && /relay-probe\.mjs$/.test(process.argv[1])) {
   console.log("owner pubkey:", OWNER);
   const r = await post("/query", [{ kinds: [9], "#h": [CHANNEL], limit: 8 }]);
   console.log("query status:", r.status);
