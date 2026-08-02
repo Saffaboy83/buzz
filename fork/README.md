@@ -164,6 +164,53 @@ openssl s_client issuer               -> Norton Web/Mail Shield Root
 Same failure family as the Railway CLI, which is also a rustls binary with a
 bundled root store and likewise cannot talk to its API from this machine.
 
+### It toggles, and while it is on nothing else about agents can be measured
+
+Re-checked 2026-08-02. Interception is **not** constant, which is why this looked
+inconsistent at first:
+
+| Window (UTC) | Agent starts | Outcome |
+| --- | --- | --- |
+| 2026-07-30 03:25 | 1 | connected, subscribed to the channel |
+| 2026-07-30 04:24 → 11:31 | 3 | every one died on `invalid peer certificate` |
+| 2026-07-31 02:50 → 04:00 | 4 | connected, subscribed, answered — all the good numbers came from here |
+| 2026-07-31 04:06 → 2026-08-02 17:00 | 6 | every one died on `invalid peer certificate` |
+
+Nothing in Buzz changed across those boundaries. Norton's encrypted-connections
+scanning engages and disengages on its own schedule, and has been on
+continuously since 2026-07-31 04:06. When it is on, `buzz-acp`
+reaches `agent_pool_ready` and *then* exits on the relay connect, so the symptom
+is "agent silently absent", not "agent slow".
+
+It is **host-selective** — Norton keeps its own allowlist. Measured the same day
+with `openssl s_client`:
+
+| Host | Issuer seen |
+| --- | --- |
+| `relay-production-61de.up.railway.app` | Norton Web/Mail Shield Root |
+| `github.com` | Norton Web/Mail Shield Root |
+| `buzz-eta-five.vercel.app` | Norton Web/Mail Shield Root |
+| `api.anthropic.com` | Google Trust Services (**not** intercepted) |
+
+So Norton already exempts a host it cares about. Adding the relay host to that
+same exclusion list is the low-risk fix — it is a change to antivirus settings,
+so it has to be made by hand in Norton's UI.
+
+**Why Node tooling never noticed.** Norton drops its scanning root at
+`C:\ProgramData\Norton\Antivirus\wscert.pem` and this machine exports
+`NODE_EXTRA_CA_CERTS` pointing at it, so every Node process trusts the
+re-signed chain transparently. That masks the problem and will mislead a
+diagnostic: a plain `fetch()` from Node returns 200 against an intercepted host
+and looks like proof that interception is off. Unset the variable to get a
+truthful answer —
+
+```
+node                          -> OK 200        (inherits Norton's bundle)
+env -u NODE_EXTRA_CA_CERTS node -> UNABLE_TO_VERIFY_LEAF_SIGNATURE
+```
+
+The second line is what `buzz-acp` sees.
+
 **Two ways out.**
 
 1. *Fastest, fixes everything system-wide:* stop Norton scanning HTTPS for this
@@ -243,7 +290,7 @@ Applied in `%APPDATA%\xyz.block.buzz.app\agents\` (backups alongside, suffixed
 | Setting | Was | Now | Why |
 | --- | --- | --- | --- |
 | `BUZZ_ACP_AGENTS` (global env) | unset → 10 | `2` | caps every agent's pool |
-| `CLAUDE_CODE_EFFORT_LEVEL` | unset | `low` | fable-5 is adaptive/xhigh-capable; "hi" does not need a reasoning budget |
+| `CLAUDE_CODE_EFFORT_LEVEL` | unset | `low`, then **reverted to unset** | never confirmed live; see the verdict below |
 | `parallelism` per agent | 10 | 2 | belt and braces with the env cap |
 | active agents | 10 | 1 (Fabey) | one responder beats four talking over each other |
 | `turn_timeout_seconds` | 320 | 90 | a hung turn surfaces instead of stalling |
@@ -276,13 +323,9 @@ the running app rather than inferred:
 { "env_vars": { "BUZZ_ACP_AGENTS": "2", "BUZZ_ACP_LAZY_POOL": "false" } }
 ```
 
-A third is set but **not yet confirmed live**: `CLAUDE_CODE_EFFORT_LEVEL: "low"`.
-In isolation against `fable-5` it halves the first turn (6.9 s → 3.5 s, n=3), and
-the one live sample taken before Buzz was closed came in at 9.2 s against a
-10.2 s median. That is one sample — treat it as unproven until three more say so.
-It is safe to leave on: `CLAUDE_CODE_EFFORT_LEVEL` is read only by the **claude**
-runtime bridge (`config_bridge/claude.rs`), so the codex agent running
-`gpt-5.6-sol` never sees it. Remove that one key to revert.
+A third was set on 2026-07-31 and **removed again on 2026-08-02**:
+`CLAUDE_CODE_EFFORT_LEVEL: "low"`. It never earned the live confirmation it
+needed, and the attempt to get it was blocked — see *Effort level* below.
 
 The agent picks these up **without restarting Buzz** — `auto_restart_on_config_change`
 respawns it on a config write. Confirmed in the log: config written 03:36:44,
@@ -292,6 +335,12 @@ first message arrived.
 
 That also makes cold-path measurement repeatable: rewrite the config file to bump
 its mtime, wait for a fresh `agent_pool_ready`, then time one message.
+
+**Caveat found on 2026-08-02:** that trick restarts a *running* agent. It does
+nothing when `buzz-acp` has already exited — a config write against a dead agent
+produces no new log line and no respawn, because there is no process to restart.
+If the log's last entry is an error rather than a subscription, restart Buzz
+itself; `start_on_app_launch` is what spawns the agent from cold.
 
 ### How it was measured, before and after
 
@@ -433,6 +482,67 @@ chat personas and coding agents.
 model in production, and take three samples. Both wrong conclusions here came
 from skipping one of those.
 
+#### Verdict, 2026-08-02: removed — unconfirmed, not disproven
+
+The key is gone from `global-agent-config.json`. The file is back to the two
+settings that were verified live:
+
+```json
+{ "env_vars": { "BUZZ_ACP_AGENTS": "2", "BUZZ_ACP_LAZY_POOL": "false" } }
+```
+
+**No new samples were taken. The live evidence is still n=1.** The session that
+was supposed to produce three cold samples got zero, because `buzz-acp` could
+not reach the relay at all — Norton's TLS interception (above) was active, and
+every agent start died at the relay connect. Four starts were attempted
+(16:57:23, 16:57:39, 16:59:56, 17:00:15 UTC); all four reached
+`agent_pool_ready agents=2` and then exited on
+`invalid peer certificate: UnknownIssuer`. A timed-out measurement says nothing
+about a config key, so nothing was inferred from it.
+
+It was removed rather than left in place, for three reasons that hold
+independently of the missing samples:
+
+- **The one live sample is inside the noise.** 9.2 s against a 10.2 s median
+  whose own three samples were 10.0 / 10.2 / 11.5 s. A 1.0 s gap on n=1 in a
+  distribution that wide is not a result — and it is nowhere near the 3.4 s the
+  isolation test predicted (6.9 s → 3.5 s). Those two numbers disagree, which is
+  precisely why the live check mattered.
+- **It was set globally, so it applied to every claude-runtime agent**, not just
+  the Fabey chat persona — including any agent doing real work. This file's own
+  advice was to set it per-agent for exactly that reason.
+- **Less reasoning budget is less reasoning.** An unverified capability trade is
+  the wrong thing to leave running by default.
+
+Restoring it is one line in `global-agent-config.json`, and the isolation result
+still stands — if the relay path is ever measurable again, this is the first
+thing worth re-testing:
+
+```json
+"CLAUDE_CODE_EFFORT_LEVEL": "low"
+```
+
+#### The harness is in `fork/measure/`
+
+It used to live in `%TEMP%`, which is not a place to keep the only means of
+settling an open question. Three files, no secrets in any of them — the owner
+key is read from `~/.buzz-relay-owner-key.txt` at runtime:
+
+| File | What it does |
+| --- | --- |
+| `relay-probe.mjs` | NIP-98 auth + `post()` helper. Run it directly to dump channel history. |
+| `time-turn-ws.mjs` | Times one turn over a NIP-42 WebSocket subscription — the transport the desktop actually receives on. Every prompt carries a token the reply must echo, so a late reply from the previous turn cannot be matched and reported as an impossible 1.6 s. |
+| `cold-sample.sh` | Rewrites the config to force a fresh pool, waits for the agent to subscribe, then takes exactly one cold sample. Reports `TLS_BLOCKED` instead of a number when Norton is in the way. |
+
+With Buzz running and the relay reachable, three samples per arm:
+
+```bash
+cd fork/measure
+for m in 01 02 03; do ./cold-sample.sh A "LOW$m"; ./cold-sample.sh B "DEF$m"; done
+```
+
+Alternating the arms is deliberate — see the header comment in the script.
+
 Untested candidates, both of which trade capability for latency and so were left
 alone: `BUZZ_ACP_CONTEXT_MESSAGE_LIMIT` (12 — pre-prompt history fetched per
 turn; lowering it gives the agent less conversation to work with) and
@@ -463,8 +573,8 @@ Recorded so none of these get re-litigated:
 | Suspect | Verdict |
 | --- | --- |
 | Relay latency | 108 ms median RTT — never a factor |
-| Norton TLS interception | agents connect fine *with* Norton re-signing; it broke `buzz-acp` startup, never turn latency |
-| `CLAUDE_CODE_EFFORT_LEVEL=low` | 12.2 s vs 12.7 s — noise, and it costs answer quality |
+| Norton TLS interception | never a turn-latency factor — but **retracted as "harmless"**: while scanning is on, `buzz-acp` cannot connect at all, so it gates whether any measurement is possible |
+| `CLAUDE_CODE_EFFORT_LEVEL=low` | not settled. The 12.2 s vs 12.7 s here was measured against the wrong model and is retracted; against `fable-5` it halves the first turn in isolation but was never confirmed on the live path. Currently **unset** — see the verdict above |
 | Agent working directory | already `~/.buzz` (14 entries), not a large repo |
 | Session churn | `channel_id → session_id` is cached; sessions are reused |
 
@@ -481,6 +591,19 @@ builtin personas (fizz/honey/bumble) as *new, active* entries at the hardcoded
 `DEFAULT_AGENT_PARALLELISM = 10`, with empty pubkeys. Deleting the Welcome Team
 from `teams.json` does **not** stop it — they come from the builtin persona seed,
 not the team. So editing that file is not durable on its own.
+
+**And `global-agent-config.json` is rewritten while the app is running** — found
+on 2026-08-02, and it silently undoes edits. `CLAUDE_CODE_EFFORT_LEVEL` was
+removed from the file with Buzz open; roughly three minutes later the app
+flushed its in-memory copy back to disk and the key was there again, because
+that copy had been loaded at launch. The same edit with Buzz closed stuck.
+
+This does not contradict the mtime trick above — a config *write* is still what
+triggers `auto_restart_on_config_change`, and the running agent does pick the
+new values up. But it means a **durable** change has to be made with the app
+closed, and any change made while it is open should be re-checked afterwards
+rather than assumed. `python fork/tune-desktop-agents.py` says "with the app
+closed" for this reason.
 
 What *is* durable is the global env layer. `runtime.rs` writes
 `BUZZ_ACP_AGENTS` from the record at line 729, then writes user `env_vars`
