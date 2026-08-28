@@ -1053,6 +1053,7 @@ type MockSubscription = {
 
 type MockFilter = {
   "#a"?: string[];
+  "#buzz-channel"?: string[];
   "#d"?: string[];
   "#e"?: string[];
   "#h"?: string[];
@@ -1256,6 +1257,10 @@ declare global {
     }>;
     /** Omits kind 30621 seeds while retaining standalone kind 30617 repositories. */
     __BUZZ_E2E_REPOSITORY_ONLY_PROJECTS__?: boolean;
+    /** Leaves broad project enumeration pending while scoped project queries remain available. */
+    __BUZZ_E2E_DEFER_FULL_PROJECT_QUERIES__?: boolean;
+    /** Omits all seeded project and repository events for empty-state tests. */
+    __BUZZ_E2E_EMPTY_PROJECTS__?: boolean;
     /** Project-scoped events accepted by the mock relay. */
     __BUZZ_E2E_ACCEPTED_PROJECT_EVENTS__?: Array<{
       content: string;
@@ -5909,6 +5914,10 @@ function writeMockProjectBranch(
 }
 
 function buildMockProjectEvents(): RelayEvent[] {
+  if (window.__BUZZ_E2E_EMPTY_PROJECTS__) {
+    return [];
+  }
+
   const events: RelayEvent[] = [];
   const daySeconds = 86_400;
   const now = Math.floor(Date.now() / 1000);
@@ -10488,6 +10497,17 @@ function sendToMockSocket(args: {
           subId,
           "mock project query failure",
         ]);
+        return;
+      }
+      if (
+        window.__BUZZ_E2E_DEFER_FULL_PROJECT_QUERIES__ &&
+        !filter.authors &&
+        !filter["#a"] &&
+        !filter["#buzz-channel"] &&
+        !filter["#d"] &&
+        !filter["#e"] &&
+        !filter.ids
+      ) {
         return;
       }
       for (const event of filterMockProjectEvents(filter)) {
